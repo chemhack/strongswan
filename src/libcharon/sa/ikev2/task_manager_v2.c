@@ -343,7 +343,9 @@ METHOD(task_manager_t, retransmit, status_t,
 					 this->initiating.retransmitted, message_id);
 				charon->bus->alert(charon->bus, ALERT_RETRANSMIT_SEND, packet);
 			}
-			send_packets(this, this->initiating.packets, NULL, NULL);
+			send_packets(this, this->initiating.packets,
+						 this->ike_sa->get_my_host(this->ike_sa),
+						 this->ike_sa->get_other_host(this->ike_sa));
 		}
 		else
 		{	/* for routeability checks, we use a more aggressive behavior */
