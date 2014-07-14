@@ -126,7 +126,6 @@ static int run()
 			{
 				DBG1(DBG_DMN, "signal of type SIGHUP received. Reloading "
 					 "configuration");
-#ifdef STRONGSWAN_CONF
 				if (lib->settings->load_files(lib->settings, STRONGSWAN_CONF,
 											  FALSE))
 				{
@@ -134,7 +133,6 @@ static int run()
 					lib->plugins->reload(lib->plugins, NULL);
 				}
 				else
-#endif
 				{
 					DBG1(DBG_DMN, "reloading config failed, keeping old");
 				}
@@ -325,7 +323,7 @@ int main(int argc, char *argv[])
 
 	dbg = dbg_stderr;
 	atexit(library_deinit);
-	if (!library_init(NULL, "charon-cmd"))
+	if (!library_init(STRONGSWAN_CONF, "charon-cmd"))
 	{
 		exit(SS_RC_LIBSTRONGSWAN_INTEGRITY);
 	}
