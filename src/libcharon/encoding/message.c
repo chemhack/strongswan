@@ -1642,11 +1642,13 @@ static status_t generate_message(private_message_t *this, keymat_t *keymat,
 			hash_payload = hash_payload_create(PLV1_HASH);
 			hash_payload->set_hash(hash_payload, hash);
 			this->payloads->insert_first(this->payloads, hash_payload);
-			if (this->exchange_type == INFORMATIONAL_V1)
+			if (this->exchange_type == INFORMATIONAL_V1 || this->exchange_type == TRANSACTION)
 			{
 				this->is_encrypted = encrypting = TRUE;
 			}
 			chunk_free(&hash);
+		}else{
+		    encrypting=false;
 		}
 	}
 
