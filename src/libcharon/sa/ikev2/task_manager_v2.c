@@ -130,6 +130,12 @@ struct private_task_manager_t {
 		 * Helper to defragment the response
 		 */
 		message_t *defrag;
+ 
+		/**
+		 * TRUE if exchange was deferred because no path was available
+		 */
+		bool deferred;
+
 
 	} initiating;
 
@@ -312,16 +318,12 @@ METHOD(task_manager_t, retransmit, status_t,
 			if (task->get_type(task) == TASK_IKE_MOBIKE)
 			{
 				mobike = (ike_mobike_t*)task;
-				if (!mobike->is_probing(mobike))
-				{
-					mobike = NULL;
-				}
 				break;
 			}
 		}
 		enumerator->destroy(enumerator);
 
-		if (mobike == NULL)
+		if (!mobike || !mobike->is_probing(mobike))
 		{
 			if (this->initiating.retransmitted <= this->retransmit_tries)
 			{
@@ -343,9 +345,28 @@ METHOD(task_manager_t, retransmit, status_t,
 					 this->initiating.retransmitted, message_id);
 				charon->bus->alert(charon->bus, ALERT_RETRANSMIT_SEND, packet);
 			}
-			send_packets(this, this->initiating.packets,
-						 this->ike_sa->get_my_host(this->ike_sa),
-						 this->ike_sa->get_other_host(this->ike_sa));
+
+			if (!mobike)
+			{
+				send_packets(this, this->initiating.packets,
+							 this->ike_sa->get_my_host(this->ike_sa),
+							 this->ike_sa->get_other_host(this->ike_sa));
+			}
+			else
+			{
+				if (!mobike->transmit(mobike, packet))
+				{
+					DBG1(DBG_IKE, "no route found to reach peer, MOBIKE update "
+						 "deferred");
+					this->ike_sa->set_condition(this->ike_sa, COND_STALE, TRUE);
+					this->initiating.deferred = TRUE;
+					return SUCCESS;
+				}
+				else if (mobike->is_probing(mobike))
+				{
+					timeout = ROUTEABILITY_CHECK_INTERVAL;
+				}
+			}
 		}
 		else
 		{	/* for routeability checks, we use a more aggressive behavior */
@@ -367,7 +388,14 @@ METHOD(task_manager_t, retransmit, status_t,
 			}
 			/* TODO-FRAG: presumably these small packets are not fragmented,
 			 * we should maybe ensure this is the case when generating them */
-			mobike->transmit(mobike, packet);
+			if (!mobike->transmit(mobike, packet))
+			{
+				DBG1(DBG_IKE, "no route found to reach peer, path probing "
+					 "deferred");
+				this->ike_sa->set_condition(this->ike_sa, COND_STALE, TRUE);
+				this->initiating.deferred = TRUE;
+				return SUCCESS;
+			}
 		}
 
 		this->initiating.retransmitted++;
@@ -392,6 +420,11 @@ METHOD(task_manager_t, initiate, status_t,
 		DBG2(DBG_IKE, "delaying task initiation, %N exchange in progress",
 				exchange_type_names, this->initiating.type);
 		/* do not initiate if we already have a message in the air */
+		if (this->initiating.deferred)
+		{	/* re-initiate deferred exchange */
+			this->initiating.deferred = FALSE;
+			return retransmit(this, this->initiating.mid);
+		}
 		return SUCCESS;
 	}
 
@@ -535,6 +568,7 @@ METHOD(task_manager_t, initiate, status_t,
 	message->set_exchange_type(message, exchange);
 	this->initiating.type = exchange;
 	this->initiating.retransmitted = 0;
+	this->initiating.deferred = FALSE;
 
 	enumerator = array_create_enumerator(this->active_tasks);
 	while (enumerator->enumerate(enumerator, &task))
@@ -643,6 +677,7 @@ static status_t process_response(private_task_manager_t *this,
 	this->initiating.mid++;
 	this->initiating.type = EXCHANGE_TYPE_UNDEFINED;
 	clear_packets(this->initiating.packets);
+	this->initiating.deferred = FALSE;
 
 	array_compress(this->active_tasks);
 
@@ -1368,6 +1403,8 @@ METHOD(task_manager_t, process_message, status_t,
 METHOD(task_manager_t, queue_task, void,
 	private_task_manager_t *this, task_t *task)
 {
+	int pos = ARRAY_TAIL;
+
 	if (task->get_type(task) == TASK_IKE_MOBIKE)
 	{	/*  there is no need to queue more than one mobike task */
 		enumerator_t *enumerator;
@@ -1384,9 +1421,12 @@ METHOD(task_manager_t, queue_task, void,
 			}
 		}
 		enumerator->destroy(enumerator);
+		/* insert MOBIKE tasks first as we currently might not have a usable
+		 * path to initiate any other tasks */
+		pos = ARRAY_HEAD;
 	}
 	DBG2(DBG_IKE, "queueing %N task", task_type_names, task->get_type(task));
-	array_insert(this->queued_tasks, ARRAY_TAIL, task);
+	array_insert(this->queued_tasks, pos, task);
 }
 
 /**
@@ -1490,7 +1530,25 @@ METHOD(task_manager_t, queue_mobike, void,
 	mobike = ike_mobike_create(this->ike_sa, TRUE);
 	if (roam)
 	{
+		enumerator_t *enumerator;
+		task_t *current;
+
 		mobike->roam(mobike, address);
+
+		/* enable path probing for a currently active MOBIKE task.  This might
+		 * not be the case if an address appeared on a new interface while the
+		 * current address is not working but has not yet disappeared. */
+		enumerator = array_create_enumerator(this->active_tasks);
+		while (enumerator->enumerate(enumerator, &current))
+		{
+			if (current->get_type(current) == TASK_IKE_MOBIKE)
+			{
+				ike_mobike_t *active = (ike_mobike_t*)current;
+				active->enable_probing(active);
+				break;
+			}
+		}
+		enumerator->destroy(enumerator);
 	}
 	else
 	{
@@ -1622,6 +1680,7 @@ METHOD(task_manager_t, reset, void,
 		this->responding.mid = respond;
 	}
 	this->initiating.type = EXCHANGE_TYPE_UNDEFINED;
+	this->initiating.deferred = FALSE;
 
 	/* reset queued tasks */
 	enumerator = array_create_enumerator(this->queued_tasks);
